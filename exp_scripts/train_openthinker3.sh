@@ -57,6 +57,7 @@ else
 fi
 
 export TENSORBOARD_PROJECT="offline-grpo"
+export VERL_MEM_LEDGER=1
 
 cd $ROOT/src/verl/
 
