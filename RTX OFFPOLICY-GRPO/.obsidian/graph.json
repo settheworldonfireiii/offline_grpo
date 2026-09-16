@@ -1,0 +1,86 @@
+{
+  "collapse-filter": false,
+  "search": "",
+  "showTags": true,
+  "showAttachments": false,
+  "hideUnresolved": true,
+  "showOrphans": false,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "tag:#branch/offloading",
+      "color": {
+        "a": 1,
+        "rgb": 14701138
+      }
+    },
+    {
+      "query": "tag:#branch/chunking",
+      "color": {
+        "a": 1,
+        "rgb": 5431378
+      }
+    },
+    {
+      "query": "tag:#branch/numerics",
+      "color": {
+        "a": 1,
+        "rgb": 11621088
+      }
+    },
+    {
+      "query": "tag:#branch/turing",
+      "color": {
+        "a": 1,
+        "rgb": 5395026
+      }
+    },
+    {
+      "query": "tag:#branch/microbatch",
+      "color": {
+        "a": 1,
+        "rgb": 15844367
+      }
+    },
+    {
+      "query": "tag:#branch/rollout",
+      "color": {
+        "a": 1,
+        "rgb": 9013641
+      }
+    },
+    {
+      "query": "tag:#branch/instrumentation",
+      "color": {
+        "a": 1,
+        "rgb": 7645630
+      }
+    },
+    {
+      "query": "tag:#branch/pinned-memory",
+      "color": {
+        "a": 1,
+        "rgb": 14513408
+      }
+    },
+    {
+      "query": "tag:#branch/allocator",
+      "color": {
+        "a": 1,
+        "rgb": 8355711
+      }
+    }
+  ],
+  "collapse-display": false,
+  "showArrow": true,
+  "textFadeMultiplier": -0.3,
+  "nodeSizeMultiplier": 1.4,
+  "lineSizeMultiplier": 1,
+  "collapse-forces": false,
+  "centerStrength": 0.42,
+  "repelStrength": 12,
+  "linkStrength": 1,
+  "linkDistance": 180,
+  "scale": 0.9020981476428631,
+  "close": false
+}
