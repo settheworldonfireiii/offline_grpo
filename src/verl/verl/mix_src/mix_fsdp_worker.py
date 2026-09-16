@@ -44,6 +44,10 @@ from verl.workers.fsdp_workers import (
 )
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
+
+from verl.utils.mem_ledger import mem_ledger
+
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_PPO_LOGGING_LEVEL", "WARN"))
 
@@ -499,8 +503,10 @@ class MIXActorRolloutRefWorker(Worker):
             with Timer(name="update_policy", logger=None) as timer:
                 torch.cuda.reset_peak_memory_stats()
                 print("[MEM-A] floor = %.2f GiB" % (torch.cuda.memory_allocated() / 2**30), flush=True)
+                mem_ledger("pre-update", self.actor_module_fsdp, self.actor_optimizer)
                 metrics = self.actor.update_policy(data=data)
                 print("[MEM] update_actor peak=%.2f GiB of 23.64" % (torch.cuda.max_memory_allocated() / 2**30), flush=True)
+                mem_ledger("post-update", self.actor_module_fsdp, self.actor_optimizer)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
