@@ -170,7 +170,7 @@ class MIXActorRolloutRefWorker(Worker):
 
         torch_dtype = fsdp_config.get("model_dtype", None)
         if torch_dtype is None:
-            torch_dtype = torch.float32 if self._is_actor else torch.float16
+            torch_dtype = torch.float32 if role == "actor"  else torch.float16
         else:
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
@@ -519,114 +519,116 @@ class MIXActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage("After update policy", logger=logger)
 
-            # TODO: here, we should return all metrics
-            output = DataProto(meta_info={"metrics": metrics})
+                # TODO: here, we should return all metrics
+                output = DataProto(meta_info={"metrics": metrics})
 
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+                output = self.ulysses_sharding_manager.postprocess_data(data=output)
+                output = output.to("cpu")
+
+            if self._is_offload_param:
+                offload_fsdp_param_and_grad(
+                    module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
+                )
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+            torch.cuda.empty_cache()
+            return output
+
+        @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+        def generate_sequences(self, prompts: DataProto):
+            prompts = prompts.to("cuda")
+            # set to False if it is validation
+            # recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
+
+            assert self._is_rollout
+            if self._is_offload_param:
+                load_fsdp_param_and_grad(
+                    module=self.actor_module_fsdp,
+                    device_id=torch.cuda.current_device(),
+                    load_grad=self._is_offload_grad,
+                )
+
+            prompts.batch = prompts.batch.cuda()
+            meta_info = {
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "pad_token_id": self.tokenizer.pad_token_id,
+            }
+            prompts.meta_info.update(meta_info)
+            with self.rollout_sharding_manager:
+                log_gpu_memory_usage(
+                    "After entering rollout sharding manager", logger=logger
+                )
+
+                prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+                output = self.rollout.generate_sequences(prompts=prompts)
+
+                log_gpu_memory_usage("After rollout generation", logger=logger)
+
+                output = self.rollout_sharding_manager.postprocess_data(output)
+
             output = output.to("cpu")
 
-        if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
+            if self._is_offload_param:
+                # NOTE(sgm): the grad is already in CPU, only offload param here
+                offload_fsdp_param_and_grad(
+                    module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
+                )
+            # clear kv cache
+            torch.cuda.empty_cache()
+            log_gpu_memory_usage("After recompute log prob", logger=logger)
+            return output
+
+        @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+        def compute_log_prob(self, data: DataProto):
+            assert self._is_actor
+            if self._is_offload_param:
+                load_fsdp_param_and_grad(module=self.actor_module_fsdp,
+                                         device_id=torch.cuda.current_device(),
+                                         load_grad=self._is_offload_grad)
+            data = data.to("cuda")
+            # we should always recompute old_log_probs when it is HybridEngine
+            data.meta_info["micro_batch_size"] = (
+                self.config.rollout.log_prob_micro_batch_size
             )
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-        torch.cuda.empty_cache()
-        return output
-
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
-        prompts = prompts.to("cuda")
-        # set to False if it is validation
-        # recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
-
-        assert self._is_rollout
-        if self._is_offload_param:
-            load_fsdp_param_and_grad(
-                module=self.actor_module_fsdp,
-                device_id=torch.cuda.current_device(),
-                load_grad=self._is_offload_grad,
+            data.meta_info["max_token_len"] = (
+                self.config.rollout.log_prob_max_token_len_per_gpu
             )
+            data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+            data.meta_info["temperature"] = self.config.rollout.temperature
+            # perform recompute log_prob
+            with self.ulysses_sharding_manager:
+                data = self.ulysses_sharding_manager.preprocess_data(data)
+                old_log_probs = self.actor.compute_log_prob(data=data)
+                data.batch["old_log_probs"] = old_log_probs
+                data = self.ulysses_sharding_manager.postprocess_data(data)
 
-        prompts.batch = prompts.batch.cuda()
-        meta_info = {
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "pad_token_id": self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
-        with self.rollout_sharding_manager:
-            log_gpu_memory_usage(
-                "After entering rollout sharding manager", logger=logger
-            )
+            output = data.select(batch_keys=["old_log_probs"])
+            output = output.to("cpu")
 
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
+            # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
+            # unshard the root FSDP module
+            if self.world_size > 1:
+                self.actor.actor_module._handle.reshard(True)
 
-            log_gpu_memory_usage("After rollout generation", logger=logger)
+            if self._is_offload_param:
+                offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
+            torch.cuda.empty_cache()
+            return output
 
-            output = self.rollout_sharding_manager.postprocess_data(output)
+        @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+        def compute_ref_log_prob(self, data: DataProto):
+            assert self._is_ref
 
-        output = output.to("cpu")
+            data = data.to("cuda")
 
-        if self._is_offload_param:
-            # NOTE(sgm): the grad is already in CPU, only offload param here
-            offload_fsdp_param_and_grad(
-                module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
-            )
-        # clear kv cache
-        torch.cuda.empty_cache()
-        log_gpu_memory_usage("After recompute log prob", logger=logger)
-        return output
-
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_log_prob(self, data: DataProto):
-        assert self._is_actor
-        if self._is_offload_param:
-            load_fsdp_param_and_grad(module=self.actor_module_fsdp,
-                                     device_id=torch.cuda.current_device(),
-                                     load_grad=self._is_offload_grad)
-        data = data.to("cuda")
-        # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = (
-            self.config.rollout.log_prob_micro_batch_size
-        )
-        data.meta_info["max_token_len"] = (
-            self.config.rollout.log_prob_max_token_len_per_gpu
-        )
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        # perform recompute log_prob
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
-            old_log_probs = self.actor.compute_log_prob(data=data)
-            data.batch["old_log_probs"] = old_log_probs
-            data = self.ulysses_sharding_manager.postprocess_data(data)
-
-        output = data.select(batch_keys=["old_log_probs"])
-        output = output.to("cpu")
-
-        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # unshard the root FSDP module
-        if self.world_size > 1:
-            self.actor.actor_module._handle.reshard(True)
-
-        torch.cuda.empty_cache()
-        return output
-
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_ref_log_prob(self, data: DataProto):
-        assert self._is_ref
-
-        data = data.to("cuda")
-
-        micro_batch_size = self.config.ref.log_prob_micro_batch_size
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.ref_policy.compute_log_prob(data=data)
+            micro_batch_size = self.config.ref.log_prob_micro_batch_size
+            data.meta_info["micro_batch_size"] = micro_batch_size
+            data.meta_info["temperature"] = self.config.rollout.temperature
+            data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+            data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+            with self.ulysses_sharding_manager:
+                data = self.ulysses_sharding_manager.preprocess_data(data)
+                output = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={"ref_log_prob": output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
