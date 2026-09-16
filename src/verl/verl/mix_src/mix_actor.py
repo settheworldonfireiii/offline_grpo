@@ -374,7 +374,15 @@ class MIXDataParallelPPOActor(DataParallelPPOActor):
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.actor_module.parameters(), max_norm=self.config.grad_clip
             )
+        
+
+
+        from verl.utils.fsdp_utils import load_fsdp_optimizer, offload_fsdp_optimizer
+        load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
         self.actor_optimizer.step()
+        offload_fsdp_optimizer(optimizer=self.actor_optimizer)        
+
+
         if self.alpha_optimizer is not None:
             self.alpha_optimizer.step()
         return grad_norm

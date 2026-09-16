@@ -484,10 +484,10 @@ class MIXActorRolloutRefWorker(Worker):
                 device_id=torch.cuda.current_device(),
                 load_grad=self._is_offload_grad,
             )
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(
-                optimizer=self.actor_optimizer, device_id=torch.cuda.current_device()
-            )
+        #if self._is_offload_optimizer:
+        #    load_fsdp_optimizer(
+        #        optimizer=self.actor_optimizer, device_id=torch.cuda.current_device()
+        #    )
 
         data.batch = data.batch.cuda()
 
@@ -499,7 +499,6 @@ class MIXActorRolloutRefWorker(Worker):
             with Timer(name="update_policy", logger=None) as timer:
                 torch.cuda.reset_peak_memory_stats()
                 print("[MEM-A] floor = %.2f GiB" % (torch.cuda.memory_allocated() / 2**30), flush=True)
-        torch.cuda.reset_peak_memory_stats()
                 metrics = self.actor.update_policy(data=data)
                 print("[MEM] update_actor peak=%.2f GiB of 23.64" % (torch.cuda.max_memory_allocated() / 2**30), flush=True)
             delta_time = timer.last
